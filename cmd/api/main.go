@@ -1,102 +1,126 @@
 package main
 
 import (
-	"bytes"
-	"crypto/sha256"
+	"encoding/json"
 	"fmt"
-	"strconv"
-	"time"
+
+	"github.com/hyperledger/fabric-contract-api-go/contractapi"
 )
 
-// Block represents each 'item' in the blockchain
-type Block struct {
-	Index        int
-	Timestamp    string
-	Data         string
-	PreviousHash []byte
-	Hash         []byte
-	Nonce        int
+// SmartContract provides functions for managing the supply chain
+type SmartContract struct {
+	contractapi.Contract
 }
 
-// CalculateHash computes the SHA-256 hash of the block
-func (b *Block) CalculateHash() []byte {
-	var hashData bytes.Buffer
-	hashData.WriteString(strconv.Itoa(b.Index))
-	hashData.WriteString(b.Timestamp)
-	hashData.WriteString(b.Data)
-	hashData.Write(b.PreviousHash)
-	hashData.WriteString(strconv.Itoa(b.Nonce))
-
-	hash := sha256.Sum256(hashData.Bytes())
-	return hash[:]
+// Product describes basic details of what makes up a product
+type Product struct {
+	ID          string `json:"id"`
+	Description string `json:"description"`
+	Owner       string `json:"owner"`
+	Status      string `json:"status"`
 }
 
-// MineBlock performs proof-of-work
-func (b *Block) MineBlock(difficulty int) {
-	target := bytes.Repeat([]byte{0}, difficulty)
-	for {
-		b.Hash = b.CalculateHash()
-		if bytes.HasPrefix(b.Hash, target) {
-			fmt.Printf("Block mined: %x\n", b.Hash)
-			break
-		} else {
-			b.Nonce++
+// InitLedger adds a base set of products to the ledger
+func (s *SmartContract) InitLedger(ctx contractapi.TransactionContextInterface) error {
+	products := []Product{
+		{ID: "product1", Description: "Laptop", Owner: "Manufacturer", Status: "Manufactured"},
+		{ID: "product2", Description: "Phone", Owner: "Manufacturer", Status: "Manufactured"},
+	}
+
+	for _, product := range products {
+		productJSON, err := json.Marshal(product)
+		if err != nil {
+			return err
+		}
+
+		err = ctx.GetStub().PutState(product.ID, productJSON)
+		if err != nil {
+			return fmt.Errorf("Failed to put to world state. %s", err.Error())
 		}
 	}
+
+	return nil
 }
 
-// Blockchain is a series of validated Blocks
-type Blockchain struct {
-	Blocks     []*Block
-	Difficulty int
-}
-
-// CreateGenesisBlock generates the first block
-func CreateGenesisBlock() *Block {
-	genesisBlock := &Block{
-		Index:        0,
-		Timestamp:    time.Now().String(),
-		Data:         "Genesis Block",
-		PreviousHash: []byte{},
-		Nonce:        0,
+// CreateProduct adds a new product to the world state
+func (s *SmartContract) CreateProduct(ctx contractapi.TransactionContextInterface, id string, description string) error {
+	exists, err := s.ProductExists(ctx, id)
+	if err != nil {
+		return err
 	}
-	genesisBlock.Hash = genesisBlock.CalculateHash()
-	return genesisBlock
+	if exists {
+		return fmt.Errorf("Product %s already exists", id)
+	}
+
+	product := Product{
+		ID:          id,
+		Description: description,
+		Owner:       "Manufacturer",
+		Status:      "Manufactured",
+	}
+	productJSON, err := json.Marshal(product)
+	if err != nil {
+		return err
+	}
+
+	return ctx.GetStub().PutState(id, productJSON)
 }
 
-// AddBlock adds a new block to the blockchain
-func (bc *Blockchain) AddBlock(data string) {
-	prevBlock := bc.Blocks[len(bc.Blocks)-1]
-	newBlock := &Block{
-		Index:        prevBlock.Index + 1,
-		Timestamp:    time.Now().String(),
-		Data:         data,
-		PreviousHash: prevBlock.Hash,
-		Nonce:        0,
+// TransferProduct updates the owner and status of a product
+func (s *SmartContract) TransferProduct(ctx contractapi.TransactionContextInterface, id string, newOwner string, newStatus string) error {
+	product, err := s.ReadProduct(ctx, id)
+	if err != nil {
+		return err
 	}
-	newBlock.MineBlock(bc.Difficulty)
-	bc.Blocks = append(bc.Blocks, newBlock)
+
+	product.Owner = newOwner
+	product.Status = newStatus
+
+	productJSON, err := json.Marshal(product)
+	if err != nil {
+		return err
+	}
+
+	return ctx.GetStub().PutState(id, productJSON)
+}
+
+// ReadProduct returns the product stored in the world state with given id
+func (s *SmartContract) ReadProduct(ctx contractapi.TransactionContextInterface, id string) (*Product, error) {
+	productJSON, err := ctx.GetStub().GetState(id)
+	if err != nil {
+		return nil, fmt.Errorf("Failed to read from world state. %s", err.Error())
+	}
+	if productJSON == nil {
+		return nil, fmt.Errorf("Product %s does not exist", id)
+	}
+
+	var product Product
+	err = json.Unmarshal(productJSON, &product)
+	if err != nil {
+		return nil, err
+	}
+
+	return &product, nil
+}
+
+// ProductExists returns true when product with given ID exists in world state
+func (s *SmartContract) ProductExists(ctx contractapi.TransactionContextInterface, id string) (bool, error) {
+	productJSON, err := ctx.GetStub().GetState(id)
+	if err != nil {
+		return false, fmt.Errorf("Failed to read from world state. %s", err.Error())
+	}
+
+	return productJSON != nil, nil
 }
 
 func main() {
-	// Initialize blockchain with genesis block
-	blockchain := &Blockchain{
-		Blocks:     []*Block{CreateGenesisBlock()},
-		Difficulty: 3, // Adjust the difficulty as needed
+	chaincode, err := contractapi.NewChaincode(new(SmartContract))
+	if err != nil {
+		fmt.Printf("Error creating supplychain chaincode: %s", err.Error())
+		return
 	}
 
-	// Add new blocks
-	blockchain.AddBlock("First Block after Genesis")
-	blockchain.AddBlock("Second Block after Genesis")
-
-	// Print the blockchain
-	for _, block := range blockchain.Blocks {
-		fmt.Printf("Index: %d\n", block.Index)
-		fmt.Printf("Timestamp: %s\n", block.Timestamp)
-		fmt.Printf("Data: %s\n", block.Data)
-		fmt.Printf("PreviousHash: %x\n", block.PreviousHash)
-		fmt.Printf("Hash: %x\n", block.Hash)
-		fmt.Printf("Nonce: %d\n", block.Nonce)
-		fmt.Println("-------------------------------")
+	if err := chaincode.Start(); err != nil {
+		fmt.Printf("Error starting supplychain chaincode: %s", err.Error())
 	}
 }
